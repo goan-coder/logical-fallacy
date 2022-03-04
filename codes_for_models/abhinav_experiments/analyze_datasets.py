@@ -23,9 +23,9 @@ def get_stats(df):
 
 
 logger = get_logger(level='WARN')
-# train_df = pd.read_csv('../../data/climate_train.csv')
-# dev_df = pd.read_csv('../../data/climate_dev.csv')
-test_df = pd.read_csv('../../data/climate_test.csv')
-# all_df = pd.concat([train_df, dev_df, test_df])
-results = [get_stats(test_df)]
+train_df = pd.read_csv('../../data/climate_train_mh.csv')
+dev_df = pd.read_csv('../../data/climate_dev_mh.csv')
+test_df = pd.read_csv('../../data/climate_test_mh.csv')
+all_df = pd.concat([train_df, dev_df, test_df])
+results = [get_stats(train_df), get_stats(dev_df), get_stats(test_df), get_stats(all_df)]
 print(results)

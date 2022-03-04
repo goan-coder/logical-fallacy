@@ -55,7 +55,7 @@ if __name__ == "__main__":
         model.to(device)
     model.eval()
     logger.info("starting testing")
-    _, _, test_loader = fallacy_ds.get_data_loaders()
+    train_loader, val_loader, test_loader = fallacy_ds.get_data_loaders()
     scores = eval1(model, test_loader, logger, device)
     logger.info("micro f1: %f macro f1:%f precision: %f recall: %f exact match %f", scores[4], scores[5], scores[1],
                 scores[2], scores[3])

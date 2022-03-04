@@ -2,6 +2,7 @@ import torch
 import pandas as pd
 from sklearn.metrics import precision_score, recall_score, f1_score
 import re
+import torch.nn.functional as F
 
 
 def add(char, num):
@@ -39,7 +40,7 @@ def eval_classwise(model, test_loader, logger, unique_labels, device):
     with torch.no_grad():
         all_preds = []
         all_labels = []
-        for batch_idx, (pair_token_ids, mask_ids, seg_ids, y) in enumerate(test_loader):
+        for batch_idx, (pair_token_ids, mask_ids, seg_ids, y, weights) in enumerate(test_loader):
             # logger.debug("%d", batch_idx)
             pair_token_ids = pair_token_ids.to(device)
             mask_ids = mask_ids.to(device)
@@ -52,9 +53,11 @@ def eval_classwise(model, test_loader, logger, unique_labels, device):
                                       token_type_ids=seg_ids,
                                       attention_mask=mask_ids,
                                       labels=labels).values()
-            all_preds.append(torch.log_softmax(prediction, dim=1).argmax(dim=1))
+            pred = torch.argmax(torch.log_softmax(prediction, dim=1)[:, 0])
+            pred = F.one_hot(pred, num_classes=13)
+            all_preds.append(pred)
             all_labels.append(labels)
-        all_preds = 1 - torch.stack(all_preds)
+        all_preds = torch.stack(all_preds)
         all_labels = 1 - torch.stack(all_labels)
         all_preds[all_preds < 0] = 0
         all_labels[all_labels < 0] = 0
@@ -91,13 +94,19 @@ def convert_to_multilabel(df, debug=False):
     data = []
     for text in df['text'].unique():
         selected_df = df[df['text'] == text]
+        hypothesis = None
         gt_labels = []
         pred_labels = []
+        best_label = None
+        max_prob = 0
         for i, row in selected_df.iterrows():
             if row['ground_truth'] == 'entailment':
                 gt_labels.append(row['label'])
-            if row['prediction'] == 'entailment':
-                pred_labels.append(row['label'])
+                hypothesis = row['hypothesis']
+            if row['prediction'] == 'entailment' and float(row['prob']) > max_prob:
+                max_prob = float(row['prob'])
+                best_label = row['label']
+        pred_labels.append(best_label)
         # if debug:
         # print(gt_labels)
         # print(pred_labels)
@@ -108,8 +117,9 @@ def convert_to_multilabel(df, debug=False):
             result = "exact match"
         else:
             result = "partial match"
-        data.append([text, gt_labels, pred_labels, result])
-    return pd.DataFrame(data, columns=['text', 'ground_truth_labels', 'model_predicted_labels', 'result'])
+        data.append([text, hypothesis, gt_labels, pred_labels, result])
+        # logger.info("convert_to_multilabel - %s %s", hypothesis, gt_labels)
+    return pd.DataFrame(data, columns=['text', 'hypothesis', 'ground_truth_labels', 'model_predicted_labels', 'result'])
 
 
 def eval_and_store(ds, model, logger, device, map, debug=False):
@@ -135,6 +145,7 @@ def eval_and_store(ds, model, logger, device, map, debug=False):
         _, prediction = model(torch.tensor(pair_token_ids).view(1, -1).to(device),
                               token_type_ids=segment_ids.view(1, -1).to(device),
                               attention_mask=attention_mask_ids.view(1, -1).to(device), labels=y).values()
+        og_pred = prediction
         prediction = prediction.argmax(dim=1)
         if prediction == y:
             result = "Correct"
@@ -142,7 +153,10 @@ def eval_and_store(ds, model, logger, device, map, debug=False):
             result = "Wrong"
         if prediction == 0:
             prediction = "entailment"
+            prob = og_pred[0][0]
         else:
             prediction = "contradiction"
-        data.append([premise, get_label(hypothesis, ds, map, debug=debug), label, prediction, result])
-    return pd.DataFrame(data, columns=['text', 'label', 'ground_truth', 'prediction', 'result'])
+            prob = 0
+        # logger.info("eval_and_store - %s %s", hypothesis, get_label(hypothesis, ds, map))
+        data.append([premise, hypothesis, get_label(hypothesis, ds, map, debug=debug), label, prediction, result, prob])
+    return pd.DataFrame(data, columns=['text', 'hypothesis', 'label', 'ground_truth', 'prediction', 'result', 'prob'])

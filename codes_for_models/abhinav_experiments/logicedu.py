@@ -16,6 +16,8 @@ from random import sample
 from library import eval_classwise, eval_and_store, convert_to_multilabel, get_corefs, replace_masked_tokens, \
     replace_char
 from weighted_cross_entropy import CrossEntropyLoss
+import time
+import torch.nn.functional as F
 
 torch.manual_seed(0)
 
@@ -50,8 +52,9 @@ class MNLIDataset:
 
     def __init__(self, tokenizer_path, train_df, val_df, label_col_name, map='base', test_df=None, fallacy=False,
                  undersample_train=False, undersample_val=False, undersample_test=False, undersample_rate=0.04,
-                 train_strat=1, test_strat=1, multilabel=False):
+                 train_strat=1, test_strat=1, multilabel=False, siamese=False):
         # strat is used in convert_to_mnli function
+        self.siamese = siamese
         self.label_dict = {'entailment': 0, 'contradiction': 1, 'neutral': 2}
         torch.manual_seed(0)
         self.train_df = train_df
@@ -71,6 +74,7 @@ class MNLIDataset:
             self.unique_labels, self.counts_dict = get_unique_labels(pd.concat([train_df, val_df, test_df]),
                                                                      self.label_col_name,
                                                                      multilabel)
+            self.unique_labels = list(self.unique_labels)
             self.total_count = 0
             for count in self.counts_dict.values():
                 self.total_count += count
@@ -113,7 +117,9 @@ class MNLIDataset:
                         continue
                     entry.append("contradiction")
                 weight = (self.total_count / self.counts_dict[label]) / 10
-                entry.append([weight * 12, weight, weight])
+                if entry[2] == "entailment":
+                    weight *= 12
+                entry.append(weight)
                 # print(entry)
                 if strat % 2:
                     data.append(entry)
@@ -135,9 +141,14 @@ class MNLIDataset:
                                                 undersampling_rate=undersample_ratio, strat=test_strat)
         # print(self.counts_dict, self.total_count)
         # self.train_df.to_csv('results/temp.csv')
-        self.train_data = self.load_data(self.train_df)
-        self.val_data = self.load_data(self.val_df)
-        self.test_data = self.load_data(self.test_df)
+        if self.siamese:
+            self.train_data = self.train_df
+            self.val_data = self.val_df
+            self.test_data = self.test_df
+        else:
+            self.train_data = self.load_data(self.train_df)
+            self.val_data = self.load_data(self.val_df)
+            self.test_data = self.load_data(self.test_df)
 
     def load_data(self, df):
         if df is None:
@@ -155,36 +166,51 @@ class MNLIDataset:
         label_list = df['gold_label'].to_list()
         weight_list = df['weight'].to_list()
 
-        for (premise, hypothesis, label, weight) in zip(premise_list, hypothesis_list, label_list, weight_list):
-            premise_id = self.tokenizer.encode(premise, add_special_tokens=False)
-            hypothesis_id = self.tokenizer.encode(hypothesis, add_special_tokens=False)
-            pair_token_ids = [self.tokenizer.cls_token_id] + premise_id + [
-                self.tokenizer.sep_token_id] + hypothesis_id + [self.tokenizer.sep_token_id]
-            # pair_token_ids = premise_id + hypothesis_id
-            # print("max token id=", max(pair_token_ids))
-            premise_len = len(premise_id)
-            hypothesis_len = len(hypothesis_id)
+        if self.siamese is False:
+            for (premise, hypothesis, label, weight) in zip(premise_list, hypothesis_list, label_list, weight_list):
+                premise_id = self.tokenizer.encode(premise, add_special_tokens=False)
+                hypothesis_id = self.tokenizer.encode(hypothesis, add_special_tokens=False)
+                pair_token_ids = [self.tokenizer.cls_token_id] + premise_id + [
+                    self.tokenizer.sep_token_id] + hypothesis_id + [self.tokenizer.sep_token_id]
+                # pair_token_ids = premise_id + hypothesis_id
+                # print("max token id=", max(pair_token_ids))
+                premise_len = len(premise_id)
+                hypothesis_len = len(hypothesis_id)
 
-            segment_ids = torch.tensor(
-                [0] * (premise_len + 2) + [1] * (hypothesis_len + 1))  # sentence 0 and sentence 1
-            attention_mask_ids = torch.tensor([1] * (premise_len + hypothesis_len + 3))  # mask padded values
-            if len(pair_token_ids) > MAX_LEN or len(segment_ids) > MAX_LEN or len(attention_mask_ids) > MAX_LEN:
-                continue
-            token_ids.append(torch.tensor(pair_token_ids))
-            seg_ids.append(segment_ids)
-            mask_ids.append(attention_mask_ids)
-            y.append(self.label_dict[label])
-            weights.append(weight)
+                segment_ids = torch.tensor(
+                    [0] * (premise_len + 2) + [1] * (hypothesis_len + 1))  # sentence 0 and sentence 1
+                attention_mask_ids = torch.tensor([1] * (premise_len + hypothesis_len + 3))  # mask padded values
+                if len(pair_token_ids) > MAX_LEN or len(segment_ids) > MAX_LEN or len(attention_mask_ids) > MAX_LEN:
+                    continue
+                token_ids.append(torch.tensor(pair_token_ids))
+                seg_ids.append(segment_ids)
+                mask_ids.append(attention_mask_ids)
+                y.append(self.label_dict[label])
+                weights.append(weight)
 
-        token_ids = pad_sequence(token_ids, batch_first=True)
-        mask_ids = pad_sequence(mask_ids, batch_first=True)
-        seg_ids = pad_sequence(seg_ids, batch_first=True)
-        y = torch.tensor(y)
-        # print(token_ids.shape)
-        # print(torch.tensor(weights).shape)
-        dataset = TensorDataset(token_ids, mask_ids, seg_ids, y, torch.tensor(weights))
-        # print(len(dataset))
-        return dataset
+            token_ids = pad_sequence(token_ids, batch_first=True)
+            mask_ids = pad_sequence(mask_ids, batch_first=True)
+            seg_ids = pad_sequence(seg_ids, batch_first=True)
+            y = torch.tensor(y)
+            # print(token_ids.shape)
+            # print(torch.tensor(weights).shape)
+            dataset = TensorDataset(token_ids, mask_ids, seg_ids, y, torch.tensor(weights))
+            # print(len(dataset))
+            return dataset
+        else:
+            for (premise, hypothesis, label, weight) in zip(premise_list, hypothesis_list, label_list, weight_list):
+                premise_id = self.tokenizer.encode(premise, padding='max_length', truncation=True, max_length=42)
+                hypothesis_id = self.tokenizer.encode(hypothesis, padding='max_length', truncation=True, max_length=162)
+                token_ids.append(torch.tensor(premise_id))
+                mask_ids.append(torch.tensor(hypothesis_id))
+                y.append(self.label_dict[label])
+                weights.append(weight)
+
+            token_ids = pad_sequence(token_ids, batch_first=True)
+            mask_ids = pad_sequence(mask_ids, batch_first=True)
+            y = torch.tensor(y)
+            dataset = TensorDataset(token_ids, mask_ids, y, torch.tensor(weights))
+            return dataset
 
     def get_undersampled(self, ratio=0.04, batch_size=32, shuffle=True):
         train_df_entail = self.train_df[self.train_df.gold_label == 'entailment']
@@ -204,13 +230,12 @@ class MNLIDataset:
             shuffle=shuffle,
             batch_size=batch_size
         )
-
         val_loader = DataLoader(
             self.val_data,
             shuffle=shuffle,
             batch_size=batch_size
         )
-        if self.test_data:
+        if self.siamese or self.test_data:
             test_loader = DataLoader(
                 self.test_data,
                 shuffle=False,
@@ -262,9 +287,6 @@ def multi_acc(y_pred, y_test, flip=True):
     return acc, precision, recall
 
 
-import time
-
-
 def get_metrics(logits, labels, threshold=0.5, sig=True, tensors=True):
     if sig:
         sig = nn.Sigmoid()
@@ -294,7 +316,7 @@ def get_metrics(logits, labels, threshold=0.5, sig=True, tensors=True):
 def train(model, dataset, optimizer, logger, save_path, device, epochs=5, ratio=0.04, positive_weight=12, debug=False):
     train_loader, val_loader, _ = dataset.get_data_loaders()
     min_val_loss = float('inf')
-    loss_fn = CrossEntropyLoss()
+    loss_fn = nn.CrossEntropyLoss(weight=torch.tensor([1, 1, 1]).float(), reduction='none')
     loss_fn.to(device)
     for epoch in range(epochs):
         start = time.time()
@@ -314,6 +336,7 @@ def train(model, dataset, optimizer, logger, save_path, device, epochs=5, ratio=
             mask_ids = mask_ids.to(device)
             seg_ids = seg_ids.to(device)
             labels = y.to(device)
+            weights = weights.to(device)
             if debug:
                 print(pair_token_ids.shape, seg_ids.shape, mask_ids.shape)
                 break
@@ -322,11 +345,16 @@ def train(model, dataset, optimizer, logger, save_path, device, epochs=5, ratio=
                                   attention_mask=mask_ids,
                                   labels=labels).values()
             # print(weights.shape)
-            loss = loss_fn(prediction, labels, weights.to(device))
-            print('forward prop done')
+            loss = loss_fn(prediction, labels)
+            # print(loss.shape)
+            # print(weights.shape)
+            loss = (loss * weights / weights.sum()).sum()
+
+            # print('forward prop done')
             acc, prec, rec = multi_acc(prediction, labels)
             # print(acc,prec,rec)
-            loss.backward()
+            loss.mean().backward()
+            # print('backward prop done')
             optimizer.step()
 
             total_train_loss += loss.item()
@@ -346,16 +374,18 @@ def train(model, dataset, optimizer, logger, save_path, device, epochs=5, ratio=
         total_val_rec = 0
 
         with torch.no_grad():
-            for batch_idx, (pair_token_ids, mask_ids, seg_ids, y) in enumerate(val_loader):
+            for batch_idx, (pair_token_ids, mask_ids, seg_ids, y, weights) in enumerate(val_loader):
                 pair_token_ids = pair_token_ids.to(device)
                 mask_ids = mask_ids.to(device)
                 seg_ids = seg_ids.to(device)
                 labels = y.to(device)
+                weights = weights.to(device)
                 _, prediction = model(pair_token_ids,
                                       token_type_ids=seg_ids,
                                       attention_mask=mask_ids,
                                       labels=labels).values()
                 loss = loss_fn(prediction, labels)
+                loss = (loss * weights / weights.sum()).sum()
                 acc, prec, rec = multi_acc(prediction, labels)
 
                 total_val_loss += loss.item()
@@ -388,11 +418,11 @@ def train(model, dataset, optimizer, logger, save_path, device, epochs=5, ratio=
             break
 
 
-def eval1(model, test_loader, logger, device):
+def eval1(model, test_loader, logger, device, train_loader=None, val_loader=None):
     with torch.no_grad():
         all_preds = []
         all_labels = []
-        for batch_idx, (pair_token_ids, mask_ids, seg_ids, y) in enumerate(test_loader):
+        for batch_idx, (pair_token_ids, mask_ids, seg_ids, y, _) in enumerate(test_loader):
             logger.debug("%d", batch_idx)
             pair_token_ids = pair_token_ids.to(device)
             mask_ids = mask_ids.to(device)
@@ -405,11 +435,45 @@ def eval1(model, test_loader, logger, device):
                                       token_type_ids=seg_ids,
                                       attention_mask=mask_ids,
                                       labels=labels).values()
-            all_preds.append(torch.log_softmax(prediction, dim=1).argmax(dim=1))
+            pred = torch.argmax(torch.log_softmax(prediction, dim=1)[:, 0])
+            pred = F.one_hot(pred, num_classes=13)
+            all_preds.append(pred)
             all_labels.append(labels)
-        all_preds = 1 - torch.stack(all_preds)
+        if train_loader is not None:
+            for batch_idx, (pair_token_ids, mask_ids, seg_ids, y, _) in enumerate(train_loader):
+                logger.debug("%d", batch_idx)
+                pair_token_ids = pair_token_ids.to(device)
+                mask_ids = mask_ids.to(device)
+                seg_ids = seg_ids.to(device)
+                labels = y.to(device)
+                if model == "random":
+                    prediction = torch.rand([15, 3])
+                else:
+                    _, prediction = model(pair_token_ids,
+                                          token_type_ids=seg_ids,
+                                          attention_mask=mask_ids,
+                                          labels=labels).values()
+                all_preds.append(torch.log_softmax(prediction, dim=1).argmax(dim=1))
+                all_labels.append(labels)
+        if val_loader is not None:
+            for batch_idx, (pair_token_ids, mask_ids, seg_ids, y, _) in enumerate(val_loader):
+                logger.debug("%d", batch_idx)
+                pair_token_ids = pair_token_ids.to(device)
+                mask_ids = mask_ids.to(device)
+                seg_ids = seg_ids.to(device)
+                labels = y.to(device)
+                if model == "random":
+                    prediction = torch.rand([15, 3])
+                else:
+                    _, prediction = model(pair_token_ids,
+                                          token_type_ids=seg_ids,
+                                          attention_mask=mask_ids,
+                                          labels=labels).values()
+                all_preds.append(torch.log_softmax(prediction, dim=1).argmax(dim=1))
+                all_labels.append(labels)
+        all_preds = torch.stack(all_preds)
         all_labels = 1 - torch.stack(all_labels)
-        all_preds[all_preds < 0] = 0
+        # all_preds[all_preds < 0] = 0
         all_labels[all_labels < 0] = 0
         return get_metrics(all_preds, all_labels, sig=False)
 

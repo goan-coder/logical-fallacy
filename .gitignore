@@ -192,3 +192,4 @@ data/multinli*
 data/api_openai.txt
 /codes_for_models/abhinav_experiments/processed_train_df.csv
 /codes_for_models/abhinav_experiments/processed_val_df.csv
+/codes_for_models/abhinav_experiments/model.pt

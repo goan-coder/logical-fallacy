@@ -8,7 +8,7 @@ def log_sum_exp(x):
     avg = torch.mean(x, 1)
     print(avg.shape)
     x = torch.transpose(x, 0, 1)
-    
+
     x = torch.div(x, avg)
     x = torch.transpose(x, 0, 1)
     return torch.log(x)
